@@ -1,9 +1,11 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const path = require('path');
 
 // Import helpers and middleware
+const Database = require('./src/config/database');
 const LoggerHelper = require('./src/helper/LoggerHelper');
 const errorHandler = require('./src/middleware/errorHandler');
 
@@ -35,12 +37,23 @@ app.use((req, res, next) => {
 app.use('/', routes);
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime() 
-  });
+app.get('/health', async (req, res) => {
+  try {
+    const dbHealth = Database.isHealthy();
+    res.json({ 
+      status: 'OK',
+      database: dbHealth ? 'Connected' : 'Disconnected',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime() 
+    });
+  } catch (err) {
+    res.status(500).json({
+      status: 'ERROR',
+      database: 'Error',
+      timestamp: new Date().toISOString(),
+      error: err.message
+    });
+  }
 });
 
 // Error handling middleware
@@ -56,10 +69,24 @@ app.use('*', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  logger.info(`Procurement Rules API server running on port ${PORT}`);
-  console.log(`Server running at http://localhost:${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-});
+const startServer = async () => {
+  try {
+    // Connect to database
+    await Database.connect();
+    
+    // Start server
+    app.listen(PORT, () => {
+      logger.info(`Procurement API server running on port ${PORT}`);
+      console.log(`Server running at http://localhost:${PORT}`);
+      console.log(`Health check: http://localhost:${PORT}/health`);
+      console.log(`Reports: http://localhost:${PORT}/api/reports/dashboard`);
+    });
+  } catch (err) {
+    logger.error('Failed to start server:', err);
+    process.exit(1);
+  }
+};
+
+startServer();
 
 module.exports = app;
