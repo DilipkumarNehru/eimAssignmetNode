@@ -1,92 +1,86 @@
+'use strict';
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const path = require('path');
+const bodyParser = require('body-parser');
 
-// Import helpers and middleware
-const Database = require('./src/config/database');
-const LoggerHelper = require('./src/helper/LoggerHelper');
-const errorHandler = require('./src/middleware/errorHandler');
-
-// Import routes
-const routes = require('./src/router');
+// Import routers
+const prRouter = require('./src/router/pr.router');
+const reportsRouter = require('./src/router/reports.router');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Initialize logger
-const logger = new LoggerHelper();
-
 // Middleware
 app.use(helmet());
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // Request logging middleware
 app.use((req, res, next) => {
-  logger.info(`${req.method} ${req.path}`, { 
-    ip: req.ip,
-    userAgent: req.get('User-Agent')
-  });
-  next();
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    next();
 });
 
 // Routes
-app.use('/', routes);
+app.use('/api/pr', prRouter);
+app.use('/api/reports', reportsRouter);
 
-// Health check endpoint
-app.get('/health', async (req, res) => {
-  try {
-    const dbHealth = Database.isHealthy();
-    res.json({ 
-      status: 'OK',
-      database: dbHealth ? 'Connected' : 'Disconnected',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime() 
+// Root endpoint
+app.get('/', (req, res) => {
+    res.json({
+        message: 'Procurement API - Business Rules & Reporting',
+        version: '1.0.0',
+        endpoints: {
+            'POST /api/pr/processPR': 'Process Purchase Request with business rules',
+            'GET /api/pr/getPR/:id': 'Get Purchase Request by ID',
+            'GET /api/pr/getAllPRs': 'Get all Purchase Requests with filters',
+            'PUT /api/pr/updatePR/:id': 'Update Purchase Request',
+            'DELETE /api/pr/deletePR/:id': 'Delete Purchase Request',
+            'GET /api/reports/vendor-purchase-amounts': 'Aggregate vendor purchase amounts',
+            'GET /api/reports/vendor-invoice-amounts': 'Aggregate vendor invoice amounts',
+            'GET /api/reports/vendor-comparison': 'Vendor comparison report (PO vs Invoice)',
+            'POST /api/reports/create-sample-data': 'Create sample data for testing'
+        }
     });
-  } catch (err) {
-    res.status(500).json({
-      status: 'ERROR',
-      database: 'Error',
-      timestamp: new Date().toISOString(),
-      error: err.message
+});
+
+// Health check
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'OK',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
     });
-  }
 });
 
 // Error handling middleware
-app.use(errorHandler);
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({
+        error: 'Internal server error',
+        message: err.message,
+        timestamp: new Date().toISOString()
+    });
+});
 
 // 404 handler
 app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    error: 'Not found',
-    message: `Route ${req.method} ${req.originalUrl} not found`
-  });
+    res.status(404).json({
+        error: 'Not found',
+        message: `Route ${req.method} ${req.originalUrl} not found`
+    });
 });
 
 // Start server
-const startServer = async () => {
-  try {
-    // Connect to database
-    await Database.connect();
-    
-    // Start server
-    app.listen(PORT, () => {
-      logger.info(`Procurement API server running on port ${PORT}`);
-      console.log(`Server running at http://localhost:${PORT}`);
-      console.log(`Health check: http://localhost:${PORT}/health`);
-      console.log(`Reports: http://localhost:${PORT}/api/reports/dashboard`);
-    });
-  } catch (err) {
-    logger.error('Failed to start server:', err);
-    process.exit(1);
-  }
-};
-
-startServer();
+app.listen(PORT, () => {
+    console.log(`Procurement API server running on port ${PORT}`);
+    console.log(`Assignment 1: http://localhost:${PORT}/api/pr`);
+    console.log(`Assignment 2: http://localhost:${PORT}/api/reports`);
+    console.log(`Health check: http://localhost:${PORT}/health`);
+});
 
 module.exports = app;

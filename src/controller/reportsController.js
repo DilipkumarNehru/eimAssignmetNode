@@ -1,224 +1,496 @@
-const ReportsModel = require('../model/ReportsModel');
-const ResponseHelper = require('../helper/ResponseHelper');
-const LoggerHelper = require('../helper/LoggerHelper');
+'use strict';
+
+const PurchaseOrder = require('../model/purchaseOrder.model');
+const Invoice = require('../model/invoice.model');
+const output = require('../helper/api');
 
 class ReportsController {
     constructor() {
-        this.reportsModel = new ReportsModel();
-        this.responseHelper = new ResponseHelper();
-        this.logger = new LoggerHelper();
+        // Initialize any required properties
     }
 
+    // Aggregate total purchase amounts per vendor
     async getVendorPurchaseAmounts(req, res) {
         try {
-            this.logger.info('Fetching vendor purchase amounts report');
-
-            // Extract filters from query parameters
-            const filters = this.buildFilters(req.query);
+            const { startDate, endDate, department, status } = req.query;
             
-            const results = await this.reportsModel.getVendorPurchaseAmounts(filters);
+            // Build match conditions
+            const matchConditions = {};
+            if (startDate && endDate) {
+                matchConditions.orderDate = {
+                    $gte: new Date(startDate),
+                    $lte: new Date(endDate)
+                };
+            }
+            if (department) matchConditions.department = department;
+            if (status) matchConditions.status = status;
 
-            return this.responseHelper.success(res, {
-                report: 'vendor_purchase_amounts',
-                totalVendors: results.length,
-                data: results,
-                filters: filters,
-                generatedAt: new Date()
-            });
+            const aggregationPipeline = [
+                { $match: matchConditions },
+                {
+                    $group: {
+                        _id: {
+                            vendorId: "$vendorId",
+                            vendorName: "$vendorName"
+                        },
+                        totalPurchaseAmount: { $sum: "$totalAmount" },
+                        totalOrders: { $sum: 1 },
+                        averageOrderAmount: { $avg: "$totalAmount" },
+                        categories: { $addToSet: "$category" },
+                        departments: { $addToSet: "$department" },
+                        lastOrderDate: { $max: "$orderDate" },
+                        firstOrderDate: { $min: "$orderDate" }
+                    }
+                },
+                {
+                    $project: {
+                        _id: 0,
+                        vendorId: "$_id.vendorId",
+                        vendorName: "$_id.vendorName",
+                        totalPurchaseAmount: { $round: ["$totalPurchaseAmount", 2] },
+                        totalOrders: 1,
+                        averageOrderAmount: { $round: ["$averageOrderAmount", 2] },
+                        categories: 1,
+                        departments: 1,
+                        lastOrderDate: 1,
+                        firstOrderDate: 1
+                    }
+                },
+                { $sort: { totalPurchaseAmount: -1 } }
+            ];
 
-        } catch (err) {
-            this.logger.error('Error fetching vendor purchase amounts:', err);
-            return this.responseHelper.serverError(res, 
-                'Failed to generate vendor purchase amounts report', 
-                err.message
-            );
+            const results = await PurchaseOrder.aggregate(aggregationPipeline);
+
+            const response = {
+                summary: {
+                    totalVendors: results.length,
+                    totalPurchaseAmount: results.reduce((sum, vendor) => sum + vendor.totalPurchaseAmount, 0),
+                    reportGeneratedAt: new Date().toISOString()
+                },
+                vendors: results
+            };
+
+            return output.ok(req, res, response, "Vendor purchase amounts aggregated successfully", 0);
+
+        } catch (error) {
+            console.error('Error aggregating vendor purchase amounts:', error);
+            return output.serverError(req, res, error);
         }
     }
 
+    // Aggregate invoice paid amounts per vendor
     async getVendorInvoiceAmounts(req, res) {
         try {
-            this.logger.info('Fetching vendor invoice amounts report');
-
-            const filters = this.buildFilters(req.query);
+            const { startDate, endDate, department, status } = req.query;
             
-            const results = await this.reportsModel.getVendorInvoiceAmounts(filters);
+            // Build match conditions
+            const matchConditions = {};
+            if (startDate && endDate) {
+                matchConditions.invoiceDate = {
+                    $gte: new Date(startDate),
+                    $lte: new Date(endDate)
+                };
+            }
+            if (department) matchConditions.department = department;
+            if (status) matchConditions.status = status;
 
-            return this.responseHelper.success(res, {
-                report: 'vendor_invoice_amounts',
-                totalVendors: results.length,
-                data: results,
-                filters: filters,
-                generatedAt: new Date()
-            });
+            const aggregationPipeline = [
+                { $match: matchConditions },
+                {
+                    $group: {
+                        _id: {
+                            vendorId: "$vendorId",
+                            vendorName: "$vendorName"
+                        },
+                        totalInvoiceAmount: { $sum: "$totalAmount" },
+                        totalPaidAmount: { $sum: "$paidAmount" },
+                        totalOutstandingAmount: { $sum: "$outstandingAmount" },
+                        totalInvoices: { $sum: 1 },
+                        paidInvoices: {
+                            $sum: { $cond: [{ $eq: ["$status", "Paid"] }, 1, 0] }
+                        },
+                        pendingInvoices: {
+                            $sum: { $cond: [{ $eq: ["$status", "Pending"] }, 1, 0] }
+                        },
+                        overdueInvoices: {
+                            $sum: { $cond: [{ $eq: ["$status", "Overdue"] }, 1, 0] }
+                        },
+                        averageInvoiceAmount: { $avg: "$totalAmount" },
+                        categories: { $addToSet: "$category" },
+                        departments: { $addToSet: "$department" },
+                        lastInvoiceDate: { $max: "$invoiceDate" },
+                        firstInvoiceDate: { $min: "$invoiceDate" }
+                    }
+                },
+                {
+                    $project: {
+                        _id: 0,
+                        vendorId: "$_id.vendorId",
+                        vendorName: "$_id.vendorName",
+                        totalInvoiceAmount: { $round: ["$totalInvoiceAmount", 2] },
+                        totalPaidAmount: { $round: ["$totalPaidAmount", 2] },
+                        totalOutstandingAmount: { $round: ["$totalOutstandingAmount", 2] },
+                        totalInvoices: 1,
+                        paidInvoices: 1,
+                        pendingInvoices: 1,
+                        overdueInvoices: 1,
+                        averageInvoiceAmount: { $round: ["$averageInvoiceAmount", 2] },
+                        paymentPercentage: {
+                            $round: [
+                                {
+                                    $cond: [
+                                        { $eq: ["$totalInvoiceAmount", 0] },
+                                        0,
+                                        { $multiply: [{ $divide: ["$totalPaidAmount", "$totalInvoiceAmount"] }, 100] }
+                                    ]
+                                },
+                                2
+                            ]
+                        },
+                        categories: 1,
+                        departments: 1,
+                        lastInvoiceDate: 1,
+                        firstInvoiceDate: 1
+                    }
+                },
+                { $sort: { totalInvoiceAmount: -1 } }
+            ];
 
-        } catch (err) {
-            this.logger.error('Error fetching vendor invoice amounts:', err);
-            return this.responseHelper.serverError(res, 
-                'Failed to generate vendor invoice amounts report', 
-                err.message
-            );
-        }
-    }
+            const results = await Invoice.aggregate(aggregationPipeline);
 
-    async getVendorComparisonReport(req, res) {
-        try {
-            this.logger.info('Generating vendor comparison report');
-
-            const filters = this.buildFilters(req.query);
-            
-            const results = await this.reportsModel.getVendorComparisonReport(filters);
-
-            // Calculate summary statistics
-            const totalVendors = results.length;
-            const totalSpend = results.reduce((sum, vendor) => sum + vendor.summary.totalSpend, 0);
-            const totalBilled = results.reduce((sum, vendor) => sum + vendor.summary.totalBilled, 0);
-            const totalPaid = results.reduce((sum, vendor) => sum + vendor.summary.totalPaid, 0);
-            const totalOutstanding = results.reduce((sum, vendor) => sum + vendor.summary.totalOutstanding, 0);
-
-            const reportSummary = {
-                totalVendors,
-                totalSpend: Math.round(totalSpend * 100) / 100,
-                totalBilled: Math.round(totalBilled * 100) / 100,
-                totalPaid: Math.round(totalPaid * 100) / 100,
-                totalOutstanding: Math.round(totalOutstanding * 100) / 100,
-                overallBillingRate: totalSpend > 0 ? Math.round((totalBilled / totalSpend) * 100 * 100) / 100 : 0,
-                overallPaymentRate: totalBilled > 0 ? Math.round((totalPaid / totalBilled) * 100 * 100) / 100 : 0
+            const response = {
+                summary: {
+                    totalVendors: results.length,
+                    totalInvoiceAmount: results.reduce((sum, vendor) => sum + vendor.totalInvoiceAmount, 0),
+                    totalPaidAmount: results.reduce((sum, vendor) => sum + vendor.totalPaidAmount, 0),
+                    totalOutstandingAmount: results.reduce((sum, vendor) => sum + vendor.totalOutstandingAmount, 0),
+                    reportGeneratedAt: new Date().toISOString()
+                },
+                vendors: results
             };
 
-            return this.responseHelper.success(res, {
-                report: 'vendor_comparison_report',
-                summary: reportSummary,
-                data: results,
-                filters: filters,
-                generatedAt: new Date()
-            });
+            return output.ok(req, res, response, "Vendor invoice amounts aggregated successfully", 0);
 
-        } catch (err) {
-            this.logger.error('Error generating vendor comparison report:', err);
-            return this.responseHelper.serverError(res, 
-                'Failed to generate vendor comparison report', 
-                err.message
-            );
+        } catch (error) {
+            console.error('Error aggregating vendor invoice amounts:', error);
+            return output.serverError(req, res, error);
         }
     }
 
-    async getSpendAnalyticsSummary(req, res) {
+    // Vendor-wise report showing PO and Invoice totals
+    async getVendorComparison(req, res) {
         try {
-            this.logger.info('Generating spend analytics summary');
-
-            const filters = this.buildFilters(req.query);
+            const { startDate, endDate, department } = req.query;
             
-            const results = await this.reportsModel.getSpendAnalyticsSummary(filters);
+            // Build match conditions for both collections
+            const matchConditions = {};
+            if (startDate && endDate) {
+                matchConditions.date = {
+                    $gte: new Date(startDate),
+                    $lte: new Date(endDate)
+                };
+            }
+            if (department) matchConditions.department = department;
 
-            return this.responseHelper.success(res, {
-                report: 'spend_analytics_summary',
-                data: results,
-                filters: filters
-            });
+            // Aggregate Purchase Orders
+            const poAggregation = [
+                { 
+                    $match: { 
+                        ...matchConditions,
+                        ...(matchConditions.date && { orderDate: matchConditions.date })
+                    }
+                },
+                {
+                    $group: {
+                        _id: "$vendorId",
+                        vendorName: { $first: "$vendorName" },
+                        totalPOAmount: { $sum: "$totalAmount" },
+                        totalPOs: { $sum: 1 },
+                        avgPOAmount: { $avg: "$totalAmount" }
+                    }
+                }
+            ];
 
-        } catch (err) {
-            this.logger.error('Error generating spend analytics summary:', err);
-            return this.responseHelper.serverError(res, 
-                'Failed to generate spend analytics summary', 
-                err.message
-            );
-        }
-    }
+            // Aggregate Invoices
+            const invoiceAggregation = [
+                { 
+                    $match: { 
+                        ...matchConditions,
+                        ...(matchConditions.date && { invoiceDate: matchConditions.date })
+                    }
+                },
+                {
+                    $group: {
+                        _id: "$vendorId",
+                        vendorName: { $first: "$vendorName" },
+                        totalInvoiceAmount: { $sum: "$totalAmount" },
+                        totalPaidAmount: { $sum: "$paidAmount" },
+                        totalOutstanding: { $sum: "$outstandingAmount" },
+                        totalInvoices: { $sum: 1 }
+                    }
+                }
+            ];
 
-    async getDashboard(req, res) {
-        try {
-            this.logger.info('Generating dashboard data');
-
-            const filters = this.buildFilters(req.query);
-            
-            const [vendorComparison, spendSummary] = await Promise.all([
-                this.reportsModel.getVendorComparisonReport(filters),
-                this.reportsModel.getSpendAnalyticsSummary(filters)
+            const [poResults, invoiceResults] = await Promise.all([
+                PurchaseOrder.aggregate(poAggregation),
+                Invoice.aggregate(invoiceAggregation)
             ]);
 
-            // Get top 10 vendors by spend
-            const topVendors = vendorComparison.slice(0, 10);
+            // Combine results
+            const vendorMap = new Map();
 
-            const dashboard = {
-                summary: spendSummary.summary,
-                topVendors: topVendors.map(vendor => ({
-                    vendorId: vendor.vendorId,
-                    vendorName: vendor.vendorName,
-                    totalSpend: vendor.summary.totalSpend,
-                    paymentRate: vendor.summary.paymentRate,
-                    outstandingAmount: vendor.summary.totalOutstanding
-                })),
-                metrics: {
-                    totalVendors: vendorComparison.length,
-                    vendorsWithOutstanding: vendorComparison.filter(v => v.summary.totalOutstanding > 0).length,
-                    highestSpendVendor: vendorComparison[0] || null,
-                    averagePaymentRate: vendorComparison.length > 0 ? 
-                        Math.round(vendorComparison.reduce((sum, v) => sum + v.summary.paymentRate, 0) / vendorComparison.length * 100) / 100 : 0
+            // Process PO results
+            poResults.forEach(po => {
+                vendorMap.set(po._id, {
+                    vendorId: po._id,
+                    vendorName: po.vendorName,
+                    purchaseOrders: {
+                        totalAmount: Math.round(po.totalPOAmount * 100) / 100,
+                        totalOrders: po.totalPOs,
+                        averageAmount: Math.round(po.avgPOAmount * 100) / 100
+                    },
+                    invoices: {
+                        totalAmount: 0,
+                        totalPaidAmount: 0,
+                        totalOutstanding: 0,
+                        totalInvoices: 0
+                    }
+                });
+            });
+
+            // Process Invoice results
+            invoiceResults.forEach(invoice => {
+                const vendor = vendorMap.get(invoice._id) || {
+                    vendorId: invoice._id,
+                    vendorName: invoice.vendorName,
+                    purchaseOrders: {
+                        totalAmount: 0,
+                        totalOrders: 0,
+                        averageAmount: 0
+                    },
+                    invoices: {
+                        totalAmount: 0,
+                        totalPaidAmount: 0,
+                        totalOutstanding: 0,
+                        totalInvoices: 0
+                    }
+                };
+
+                vendor.invoices = {
+                    totalAmount: Math.round(invoice.totalInvoiceAmount * 100) / 100,
+                    totalPaidAmount: Math.round(invoice.totalPaidAmount * 100) / 100,
+                    totalOutstanding: Math.round(invoice.totalOutstanding * 100) / 100,
+                    totalInvoices: invoice.totalInvoices
+                };
+
+                vendorMap.set(invoice._id, vendor);
+            });
+
+            // Convert to array and add variance calculations
+            const results = Array.from(vendorMap.values()).map(vendor => {
+                const poTotal = vendor.purchaseOrders.totalAmount;
+                const invoiceTotal = vendor.invoices.totalAmount;
+                const variance = poTotal - invoiceTotal;
+                const variancePercentage = poTotal > 0 ? Math.round((variance / poTotal) * 100 * 100) / 100 : 0;
+
+                return {
+                    ...vendor,
+                    variance: {
+                        amount: Math.round(variance * 100) / 100,
+                        percentage: variancePercentage
+                    },
+                    metrics: {
+                        invoiceToPoRatio: poTotal > 0 ? Math.round((invoiceTotal / poTotal) * 100 * 100) / 100 : 0,
+                        paymentPercentage: invoiceTotal > 0 ? Math.round((vendor.invoices.totalPaidAmount / invoiceTotal) * 100 * 100) / 100 : 0
+                    }
+                };
+            }).sort((a, b) => b.purchaseOrders.totalAmount - a.purchaseOrders.totalAmount);
+
+            const response = {
+                summary: {
+                    totalVendors: results.length,
+                    totalPOAmount: results.reduce((sum, v) => sum + v.purchaseOrders.totalAmount, 0),
+                    totalInvoiceAmount: results.reduce((sum, v) => sum + v.invoices.totalAmount, 0),
+                    totalPaidAmount: results.reduce((sum, v) => sum + v.invoices.totalPaidAmount, 0),
+                    totalOutstanding: results.reduce((sum, v) => sum + v.invoices.totalOutstanding, 0),
+                    reportGeneratedAt: new Date().toISOString()
                 },
-                filters: filters,
-                generatedAt: new Date()
+                vendors: results
             };
 
-            return this.responseHelper.success(res, dashboard);
+            return output.ok(req, res, response, "Vendor comparison report generated successfully", 0);
 
-        } catch (err) {
-            this.logger.error('Error generating dashboard data:', err);
-            return this.responseHelper.serverError(res, 
-                'Failed to generate dashboard data', 
-                err.message
-            );
+        } catch (error) {
+            console.error('Error generating vendor comparison report:', error);
+            return output.serverError(req, res, error);
         }
     }
 
-    buildFilters(queryParams) {
-        const filters = {};
+    // Create sample data for testing
+    
+    async createSampleData(req, res) {
+        try {
+        let samplePOs = [];
+        let sampleInvoices = [];
 
-        // Date range filters
-        if (queryParams.startDate || queryParams.endDate) {
-            const dateFilter = {};
-            if (queryParams.startDate) {
-                dateFilter.$gte = new Date(queryParams.startDate);
+        // Check if request body exists and has data
+        if (req.body && Object.keys(req.body).length > 0 && 
+            (req.body.purchaseOrders || req.body.invoices)) {
+            
+            // Use data from request body
+            samplePOs = req.body.purchaseOrders || [];
+            sampleInvoices = req.body.invoices || [];
+            
+            console.log('Using sample data from request body');
+            
+        } else {
+            
+            // Use hardcoded sample data if no body or empty body
+            samplePOs = [
+                {
+                    poNumber: "PO-2024-001",
+                    vendorId: "VENDOR_001",
+                    vendorName: "TechCorp Solutions",
+                    department: "IT",
+                    category: "Software",
+                    totalAmount: 25000,
+                    status: "Approved",
+                    orderDate: new Date("2024-01-15"),
+                    expectedDelivery: new Date("2024-02-15"),
+                    items: [
+                        { itemId: "ITEM_001", description: "Software License", quantity: 10, unitPrice: 2000, totalPrice: 20000 },
+                        { itemId: "ITEM_002", description: "Support Package", quantity: 1, unitPrice: 5000, totalPrice: 5000 }
+                    ]
+                },
+                {
+                    poNumber: "PO-2024-002",
+                    vendorId: "VENDOR_002",
+                    vendorName: "Office Supplies Pro",
+                    department: "Operations",
+                    category: "Office Supplies",
+                    totalAmount: 3500,
+                    status: "Delivered",
+                    orderDate: new Date("2024-01-20"),
+                    expectedDelivery: new Date("2024-02-05"),
+                    items: [
+                        { itemId: "ITEM_003", description: "Office Chairs", quantity: 15, unitPrice: 150, totalPrice: 2250 },
+                        { itemId: "ITEM_004", description: "Desk Accessories", quantity: 25, unitPrice: 50, totalPrice: 1250 }
+                    ]
+                },
+                {
+                    poNumber: "PO-2024-003",
+                    vendorId: "VENDOR_003",
+                    vendorName: "Industrial Equipment LLC",
+                    department: "Manufacturing",
+                    category: "Equipment",
+                    totalAmount: 85000,
+                    status: "Approved",
+                    orderDate: new Date("2024-02-01"),
+                    expectedDelivery: new Date("2024-03-15"),
+                    items: [
+                        { itemId: "ITEM_005", description: "Industrial Printer", quantity: 2, unitPrice: 35000, totalPrice: 70000 },
+                        { itemId: "ITEM_006", description: "Maintenance Kit", quantity: 3, unitPrice: 5000, totalPrice: 15000 }
+                    ]
+                }
+            ];
+
+            sampleInvoices = [
+                {
+                    invoiceNumber: "INV-2024-001",
+                    poNumber: "PO-2024-001",
+                    vendorId: "VENDOR_001",
+                    vendorName: "TechCorp Solutions",
+                    invoiceDate: new Date("2024-02-01"),
+                    dueDate: new Date("2024-03-02"),
+                    totalAmount: 25000,
+                    paidAmount: 25000,
+                    outstandingAmount: 0,
+                    status: "Paid",
+                    department: "IT",
+                    category: "Software",
+                    paymentDate: new Date("2024-02-28")
+                },
+                {
+                    invoiceNumber: "INV-2024-002",
+                    poNumber: "PO-2024-002",
+                    vendorId: "VENDOR_002",
+                    vendorName: "Office Supplies Pro",
+                    invoiceDate: new Date("2024-02-10"),
+                    dueDate: new Date("2024-03-12"),
+                    totalAmount: 3500,
+                    paidAmount: 1750,
+                    outstandingAmount: 1750,
+                    status: "Pending",
+                    department: "Operations",
+                    category: "Office Supplies"
+                },
+                {
+                    invoiceNumber: "INV-2024-003",
+                    poNumber: "PO-2024-003",
+                    vendorId: "VENDOR_003",
+                    vendorName: "Industrial Equipment LLC",
+                    invoiceDate: new Date("2024-03-20"),
+                    dueDate: new Date("2024-04-19"),
+                    totalAmount: 85000,
+                    paidAmount: 0,
+                    outstandingAmount: 85000,
+                    status: "Pending",
+                    department: "Manufacturing",
+                    category: "Equipment"
+                }
+            ];
+            
+            console.log('Using hardcoded sample data');
+        }
+
+        // Validate data before insertion
+        if (!Array.isArray(samplePOs) || !Array.isArray(sampleInvoices)) {
+            return output.invalid(req, res, 'Purchase orders and invoices must be arrays');
+        }
+
+        // Clear existing data and insert new sample data
+        // await PurchaseOrder.deleteMany({});
+        // await Invoice.deleteMany({});
+
+        // Insert sample data
+        const insertedPOs = await PurchaseOrder.insertMany(samplePOs);
+        const insertedInvoices = await Invoice.insertMany(sampleInvoices);
+
+        // Calculate totals for response
+        const totalPOAmount = samplePOs.reduce((sum, po) => sum + (po.totalAmount || 0), 0);
+        const totalInvoiceAmount = sampleInvoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
+        const totalPaidAmount = sampleInvoices.reduce((sum, inv) => sum + (inv.paidAmount || 0), 0);
+        const totalOutstandingAmount = sampleInvoices.reduce((sum, inv) => sum + (inv.outstandingAmount || 0), 0);
+
+        const response = {
+            message: "Sample data created successfully",
+            dataSource: req.body && Object.keys(req.body).length > 0 ? "request_body" : "hardcoded",
+            statistics: {
+                purchaseOrders: insertedPOs.length,
+                invoices: insertedInvoices.length,
+                totalPOAmount: Math.round(totalPOAmount * 100) / 100,
+                totalInvoiceAmount: Math.round(totalInvoiceAmount * 100) / 100,
+                totalPaidAmount: Math.round(totalPaidAmount * 100) / 100,
+                totalOutstandingAmount: Math.round(totalOutstandingAmount * 100) / 100
+            },
+            vendors: [...new Set([
+                ...samplePOs.map(po => `${po.vendorId}: ${po.vendorName}`),
+                ...sampleInvoices.map(inv => `${inv.vendorId}: ${inv.vendorName}`)
+            ])],
+            insertedData: {
+                purchaseOrderIds: insertedPOs.map(po => po._id),
+                invoiceIds: insertedInvoices.map(inv => inv._id)
             }
-            if (queryParams.endDate) {
-                dateFilter.$lte = new Date(queryParams.endDate);
-            }
-            filters.createdDate = dateFilter;
-        }
+        };
 
-        // Vendor filter
-        if (queryParams.vendorId) {
-            filters.vendorId = queryParams.vendorId;
-        }
+        return output.created(req, res, response, "Sample data created successfully");
 
-        // Department filter
-        if (queryParams.department) {
-            filters.department = queryParams.department;
-        }
-
-        // Category filter
-        if (queryParams.category) {
-            filters.category = queryParams.category;
-        }
-
-        // Status filter
-        if (queryParams.status) {
-            filters.status = queryParams.status;
-        }
-
-        // Amount range filters
-        if (queryParams.minAmount || queryParams.maxAmount) {
-            const amountFilter = {};
-            if (queryParams.minAmount) {
-                amountFilter.$gte = parseFloat(queryParams.minAmount);
-            }
-            if (queryParams.maxAmount) {
-                amountFilter.$lte = parseFloat(queryParams.maxAmount);
-            }
-            filters.totalAmount = amountFilter;
-        }
-
-        return filters;
+    } catch (error) {
+        console.error('Error creating sample data:', error);
+        return output.serverError(req, res, error);
     }
+}
+
 }
 
 module.exports = new ReportsController();
